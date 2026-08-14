@@ -79,16 +79,57 @@ class Critic(Middleware):
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims:
+            return report
+
+        kept = []
+        needs_abstain = False
+        for claim in claims:
+            text = claim.get("text", "")
+            if not text:
+                continue
+            # Trường hợp bình thường: claim có trong bằng chứng
+            if ctx.saw(text):
+                kept.append(claim)
+                continue
+            # Trường hợp (c): câu ghép bằng " và "
+            split_ok = False
+            for sep in [" và ", " & "]:
+                if sep in text:
+                    parts = text.split(sep, 1)
+                    left, right = parts[0].strip(), parts[1].strip()
+                    if ctx.saw(left) and ctx.saw(right):
+                        # Tìm doc_id cho mỗi nửa
+                        for part in [left, right]:
+                            doc_id = claim.get("doc_id", "")
+                            if ctx.corpus:
+                                for doc in ctx.corpus.docs:
+                                    if doc.body in ctx.observed_text:
+                                        for line in doc.body.split("\n"):
+                                            if part in line:
+                                                doc_id = doc.doc_id
+                                                break
+                                        if doc_id != claim.get("doc_id", ""):
+                                            break
+                            kept.append({"text": part, "doc_id": doc_id})
+                        needs_abstain = True
+                        split_ok = True
+                        break
+            if split_ok:
+                continue
+            # Không tách được -> bịa: bỏ
+
+        if not kept:
+            report["abstain"] = True
+            report["claims"] = []
+            report["citations"] = []
+            report["answer"] = "Không đủ căn cứ trong tài liệu để trả lời câu hỏi này."
+        else:
+            if needs_abstain:
+                report["abstain"] = True
+            report["claims"] = kept
+            report["citations"] = sorted(set(
+                c.get("doc_id", "") for c in kept if c.get("doc_id")
+            ))
+        return report
